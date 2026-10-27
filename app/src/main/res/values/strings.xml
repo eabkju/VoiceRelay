@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">VoiceRelay</string>
+    <string name="notification_channel_name">Voice Relay Audio Service</string>
+    <string name="notification_channel_desc">Active real-time audio relay between devices</string>
+    <string name="action_stop">Stop</string>
+</resources>
