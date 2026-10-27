@@ -96,7 +96,22 @@ fun MainRelayScreen(
                 onRoleSelected = onRoleSelected
             )
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Role explanation hint
+            Text(
+                text = when (currentRole) {
+                    AppRole.LOCAL_AMP -> "🔊 Local Mic -> Real-Time Effects -> Speaker / Headphones"
+                    AppRole.MIC -> "📡 Streaming to remote phone (Switch to 'Local Amplifier' for single-phone test)"
+                    AppRole.SPEAKER -> "🎧 Playing incoming stream from sender phone in real time"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 8.dp)
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
 
             // --- ACOUSTIC FEEDBACK PRECAUTION BANNER ---
             if (currentRole == AppRole.LOCAL_AMP || isActive) {

@@ -2,6 +2,7 @@
 #include <android/log.h>
 #include <chrono>
 #include <cstring>
+#include <algorithm>
 
 #define TAG "VoiceRelayAudioEngine"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -32,8 +33,16 @@ bool AudioEngine::start(RelayRole role, CodecType codec) {
     txSeq_ = 0;
     effectsChain_.reset();
     jitterBuffer_.reset();
-    ampWritePos_.store(0);
-    ampReadPos_.store(0);
+
+    // Pre-fill local amplifier buffer with 960 frames (~20ms) of silence so playback has a cushion
+    std::fill(ampRing_, ampRing_ + AMP_RING_SIZE, 0.0f);
+    if (role_ == RelayRole::LOCAL_AMP) {
+        ampWritePos_.store(960);
+        ampReadPos_.store(0);
+    } else {
+        ampWritePos_.store(0);
+        ampReadPos_.store(0);
+    }
 
     bool success = true;
 
@@ -128,15 +137,21 @@ bool AudioEngine::openCaptureStream() {
     oboe::AudioStreamBuilder builder;
     builder.setDirection(oboe::Direction::Input)
         ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
-        ->setSharingMode(oboe::SharingMode::Exclusive)
-        ->setFormat(oboe::AudioFormat::Float)
+        ->setSharingMode(oboe::SharingMode::Shared)
+        ->setFormat(oboe::AudioFormat::I16)
         ->setChannelCount(oboe::ChannelCount::Mono)
         ->setSampleRate(48000)
-        ->setFramesPerDataCallback(480) // 10 ms at 48 kHz
+        ->setInputPreset(oboe::InputPreset::Generic)
         ->setDataCallback(this)
         ->setErrorCallback(this);
 
     oboe::Result result = builder.openStream(captureStream_);
+    if (result != oboe::Result::OK) {
+        LOGE("Failed to open capture stream with LowLatency: %s. Retrying with PerformanceMode::None...", oboe::convertToText(result));
+        builder.setPerformanceMode(oboe::PerformanceMode::None);
+        result = builder.openStream(captureStream_);
+    }
+
     if (result != oboe::Result::OK) {
         LOGE("Failed to open capture stream: %s", oboe::convertToText(result));
         return false;
@@ -150,6 +165,7 @@ bool AudioEngine::openCaptureStream() {
         return false;
     }
 
+    LOGI("Capture stream started successfully. Sample rate: %d", captureStream_->getSampleRate());
     return true;
 }
 
@@ -157,15 +173,22 @@ bool AudioEngine::openPlaybackStream() {
     oboe::AudioStreamBuilder builder;
     builder.setDirection(oboe::Direction::Output)
         ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
-        ->setSharingMode(oboe::SharingMode::Exclusive)
+        ->setSharingMode(oboe::SharingMode::Shared)
         ->setFormat(oboe::AudioFormat::I16)
         ->setChannelCount(oboe::ChannelCount::Mono)
         ->setSampleRate(48000)
-        ->setFramesPerDataCallback(480) // 10 ms at 48 kHz
+        ->setUsage(oboe::Usage::Media)
+        ->setContentType(oboe::ContentType::Music)
         ->setDataCallback(this)
         ->setErrorCallback(this);
 
     oboe::Result result = builder.openStream(playbackStream_);
+    if (result != oboe::Result::OK) {
+        LOGE("Failed to open playback stream with LowLatency: %s. Retrying with PerformanceMode::None...", oboe::convertToText(result));
+        builder.setPerformanceMode(oboe::PerformanceMode::None);
+        result = builder.openStream(playbackStream_);
+    }
+
     if (result != oboe::Result::OK) {
         LOGE("Failed to open playback stream: %s", oboe::convertToText(result));
         return false;
@@ -179,6 +202,7 @@ bool AudioEngine::openPlaybackStream() {
         return false;
     }
 
+    LOGI("Playback stream started successfully. Sample rate: %d", playbackStream_->getSampleRate());
     return true;
 }
 
@@ -210,10 +234,12 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
 
     if (audioStream->getDirection() == oboe::Direction::Input) {
         // --- MIC / CAPTURE CALLBACK ---
-        const float* inputSamples = static_cast<const float*>(audioData);
+        const int16_t* inputSamples = static_cast<const int16_t*>(audioData);
 
-        // Copy input to working buffer
-        std::memcpy(floatBuffer_, inputSamples, numFrames * sizeof(float));
+        // Convert 16-bit PCM to float [-1.0f, 1.0f]
+        for (int i = 0; i < numFrames; ++i) {
+            floatBuffer_[i] = static_cast<float>(inputSamples[i]) / 32768.0f;
+        }
 
         // Apply Voice Effect chain
         effectsChain_.process(floatBuffer_, numFrames);
@@ -234,19 +260,20 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
         int16_t* outputSamples = static_cast<int16_t*>(audioData);
 
         if (role_ == RelayRole::LOCAL_AMP) {
-            // Read from local amp ring buffer
             int rPos = ampReadPos_.load(std::memory_order_relaxed);
             int wPos = ampWritePos_.load(std::memory_order_acquire);
             int available = (wPos - rPos + AMP_RING_SIZE) % AMP_RING_SIZE;
 
-            if (available >= numFrames) {
-                for (int i = 0; i < numFrames; ++i) {
-                    float s = ampRing_[(rPos + i) % AMP_RING_SIZE];
-                    outputSamples[i] = static_cast<int16_t>(std::clamp(s * 32767.0f, -32768.0f, 32767.0f));
-                }
-                ampReadPos_.store((rPos + numFrames) % AMP_RING_SIZE, std::memory_order_relaxed);
-            } else {
-                std::memset(outputSamples, 0, numFrames * sizeof(int16_t));
+            int framesToRead = std::min(numFrames, available);
+            for (int i = 0; i < framesToRead; ++i) {
+                float s = ampRing_[(rPos + i) % AMP_RING_SIZE];
+                outputSamples[i] = static_cast<int16_t>(std::clamp(s * 32767.0f, -32768.0f, 32767.0f));
+            }
+            ampReadPos_.store((rPos + framesToRead) % AMP_RING_SIZE, std::memory_order_relaxed);
+
+            // If buffer underran, fill remainder with silence
+            if (framesToRead < numFrames) {
+                std::memset(outputSamples + framesToRead, 0, (numFrames - framesToRead) * sizeof(int16_t));
             }
         } else {
             // Read from Adaptive Jitter Buffer (with PLC if packet dropped)

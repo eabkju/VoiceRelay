@@ -50,7 +50,7 @@ class AudioRelayService : Service(), AudioEngineBridge.PacketCaptureListener {
     private var wakeLock: PowerManager.WakeLock? = null
 
     // Relay State Flows
-    private val _currentRole = MutableStateFlow(AppRole.MIC)
+    private val _currentRole = MutableStateFlow(AppRole.LOCAL_AMP)
     val currentRole: StateFlow<AppRole> = _currentRole.asStateFlow()
 
     private val _isRelayActive = MutableStateFlow(false)
@@ -136,6 +136,12 @@ class AudioRelayService : Service(), AudioEngineBridge.PacketCaptureListener {
     fun startRelay(role: AppRole) {
         _currentRole.value = role
 
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+        try {
+            audioManager.mode = android.media.AudioManager.MODE_NORMAL
+            audioManager.isSpeakerphoneOn = true
+        } catch (_: Exception) {}
+
         val hasFocus = audioFocusManager.requestFocus()
         audioFocusManager.setBluetoothScoEnabled(_useBluetoothScoMic.value)
 
@@ -153,6 +159,8 @@ class AudioRelayService : Service(), AudioEngineBridge.PacketCaptureListener {
             }
 
             startForegroundWithNotification(role)
+        } else {
+            android.util.Log.e("VoiceRelayService", "AudioEngine failed to start for role: $role")
         }
     }
 

@@ -19,7 +19,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isServiceBound = MutableStateFlow(false)
 
     // Exposed UI States
-    val role = MutableStateFlow(AppRole.MIC)
+    val role = MutableStateFlow(AppRole.LOCAL_AMP)
     val isActive = MutableStateFlow(false)
     val currentEffect = MutableStateFlow(VoiceEffect.NONE)
     val effectIntensity = MutableStateFlow(0.85f)
